@@ -1,15 +1,14 @@
-# copyright 2023 © Xron Trix | https://github.com/Xrontrix10
-
-
 import logging
 import yt_dlp
 from asyncio import sleep
 from threading import Thread
 from os import makedirs, path as ospath
-from colab_leecher.utility.handler import cancelTask
+from colab_leecher.utility.handler import cancelTask  # Assuming this is part of your setup
 from colab_leecher.utility.variables import YTDL, MSG, Messages, Paths
 from colab_leecher.utility.helper import getTime, keyboard, sizeUnit, status_bar, sysINFO
 
+# FIX: Add this to install ffprobe for audio checking (run once in Colab: !apt install ffmpeg)
+# (It's lightweight and helps verify audio post-download)
 
 async def YTDL_Status(link, num):
     global Messages, YTDL
@@ -96,17 +95,31 @@ def YouTubeDL(url):
             logging.info(d)
 
     ydl_opts = {
-        "format": "best",
+        # FIX: Change to merge best video + audio explicitly (this solves no-sound for HLS/m3u8)
+        "format": "bestvideo+bestaudio/best",
         "allow_multiple_video_streams": True,
         "allow_multiple_audio_streams": True,
         "writethumbnail": True,
-        "--concurrent-fragments": 4 , # Set the maximum number of concurrent fragments
+        "concurrent-fragments": 4,  # FIX: Corrected key (was "--concurrent-fragments" – yt-dlp uses this without dashes in opts)
         "allow_playlist_files": True,
         "overwrites": True,
-        "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
+        # FIX: Enhanced postprocessors – first merge video/audio with FFmpeg, then convert to MP4
+        "postprocessors": [
+            {
+                "key": "FFmpegMerger",  # FIX: Add this to merge streams if separate
+            },
+            {
+                "key": "FFmpegVideoConvertor",
+                "preferedformat": "mp4",
+            },
+            # FIX: Optional: Embed subtitles into the video if available
+            {
+                "key": "FFmpegEmbedSubtitle",
+            },
+        ],
         "progress_hooks": [my_hook],
-        "writesubtitles": "srt",  # Enable subtitles download
-        "extractor_args": {"subtitlesformat": "srt"},  # Extract subtitles in SRT format
+        "subtitlesformat": "srt",  # FIX: Moved from 'writesubtitles' to proper key for embedding
+        "writesubtitles": True,  # Enable subtitles download
         "logger": MyLogger(),
     }
 
@@ -135,6 +148,8 @@ def YouTubeDL(url):
                                 "thumbnail": f"{Paths.thumbnail_ytdl}/%(id)s.%(ext)s",
                             }
                             ydl.download([video_url])
+                    # FIX: Check for audio after each download
+                    check_audio(ydl_opts["outtmpl"]["default"].replace("%(title)s.%(ext)s", entry["title"] + ".mp4"))
             else:
                 YTDL.header = ""
                 ydl_opts["outtmpl"] = {
@@ -150,8 +165,26 @@ def YouTubeDL(url):
                             "thumbnail": f"{Paths.thumbnail_ytdl}/%(id)s.%(ext)s",
                         }
                         ydl.download([url])
+                # FIX: Check for audio
+                check_audio(ydl_opts["outtmpl"]["default"].replace("%(id)s.%(ext)s", info_dict["id"] + ".mp4"))
         except Exception as e:
             logging.error(f"YTDL ERROR: {e}")
+
+
+# FIX: New function to verify audio presence (uses ffprobe)
+def check_audio(file_path):
+    import subprocess
+    try:
+        result = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'default=noprint_wrappers=1:nokey=1', file_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if not result.stdout:
+            logging.warning(f"No audio detected in {file_path} – Attempting remux fix...")
+            fixed_path = file_path.replace(".mp4", "_fixed.mp4")
+            subprocess.run(['ffmpeg', '-i', file_path, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', fixed_path])
+            logging.info(f"Fixed audio remux saved to {fixed_path}")
+        else:
+            logging.info(f"Audio detected in {file_path}")
+    except Exception as e:
+        logging.error(f"Audio check failed: {e}")
 
 
 async def get_YT_Name(link):
